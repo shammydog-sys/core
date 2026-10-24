@@ -173,26 +173,113 @@ async def test_update_unavailable(
     assert state.state == "unavailable"
 
 
-async def test_unavailable_time(
-    mocked_projector: MagicMock, hass: HomeAssistant
+@pytest.mark.parametrize(
+    "failing_call",
+    [
+        pytest.param("get_power", id="power"),
+        pytest.param("get_mute", id="mute"),
+        pytest.param("get_input", id="input"),
+    ],
+)
+async def test_unavailable_time_while_on_keeps_state(
+    mocked_projector: MagicMock,
+    hass: HomeAssistant,
+    failing_call: str,
 ) -> None:
-    """Test unavailable time projector error."""
+    """PJLink ERR3 while the projector is on keeps power, source, and mute.
+
+    HDMI resyncs raise ERR3 from the input or mute query, or from the power
+    query when the projector is too busy to answer. None of those are off.
+    """
+
+    mocked_projector.get_input.return_value = ("HDMI", 1)
 
     await setup_pjlink_entry(hass)
 
     state = hass.states.get("media_player.test")
-    assert state.state == "on"
-    assert state.attributes["source"] is not None
-    assert state.attributes["is_volume_muted"] is not False
+    assert state.state == media_player.MediaPlayerState.ON
+    assert state.attributes[media_player.ATTR_INPUT_SOURCE] == "HDMI 1"
+    assert state.attributes[media_player.ATTR_MEDIA_VOLUME_MUTED] is True
 
-    mocked_projector.get_power.side_effect = ProjectorError("unavailable time")
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=10))
+    getattr(mocked_projector, failing_call).side_effect = ProjectorError(
+        "unavailable time"
+    )
+    async_fire_time_changed(hass, dt_util.utcnow() + media_player.SCAN_INTERVAL)
     await hass.async_block_till_done(wait_background_tasks=True)
 
     state = hass.states.get("media_player.test")
-    assert state.state == "off"
-    assert "source" not in state.attributes
-    assert "is_volume_muted" not in state.attributes
+    assert state.state == media_player.MediaPlayerState.ON
+    assert state.attributes[media_player.ATTR_INPUT_SOURCE] == "HDMI 1"
+    assert state.attributes[media_player.ATTR_MEDIA_VOLUME_MUTED] is True
+
+
+async def test_unavailable_time_while_off_stays_off(
+    mocked_projector: MagicMock, hass: HomeAssistant
+) -> None:
+    """PJLink ERR3 while the projector is off leaves it off."""
+
+    mocked_projector.get_power.return_value = "off"
+
+    await setup_pjlink_entry(hass)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.OFF
+    assert media_player.ATTR_INPUT_SOURCE not in state.attributes
+    assert media_player.ATTR_MEDIA_VOLUME_MUTED not in state.attributes
+
+    mocked_projector.get_power.side_effect = ProjectorError("unavailable time")
+    async_fire_time_changed(hass, dt_util.utcnow() + media_player.SCAN_INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.OFF
+    assert media_player.ATTR_INPUT_SOURCE not in state.attributes
+    assert media_player.ATTR_MEDIA_VOLUME_MUTED not in state.attributes
+
+
+async def test_power_on_kept_when_following_query_is_unavailable(
+    mocked_projector: MagicMock, hass: HomeAssistant
+) -> None:
+    """A power-on read in this poll is kept when a later query returns ERR3."""
+
+    mocked_projector.get_power.return_value = "off"
+
+    await setup_pjlink_entry(hass)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.OFF
+
+    mocked_projector.get_power.return_value = "on"
+    mocked_projector.get_mute.side_effect = ProjectorError("unavailable time")
+    async_fire_time_changed(hass, dt_util.utcnow() + media_player.SCAN_INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.ON
+
+
+@pytest.mark.parametrize("power_state", ["off", "cooling"])
+async def test_power_off_reports_off(
+    mocked_projector: MagicMock, hass: HomeAssistant, power_state: str
+) -> None:
+    """A reported power-off or cool-down is off and clears source and mute."""
+
+    mocked_projector.get_input.return_value = ("HDMI", 1)
+
+    await setup_pjlink_entry(hass)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.ON
+    assert state.attributes[media_player.ATTR_INPUT_SOURCE] == "HDMI 1"
+
+    mocked_projector.get_power.return_value = power_state
+    async_fire_time_changed(hass, dt_util.utcnow() + media_player.SCAN_INTERVAL)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get("media_player.test")
+    assert state.state == media_player.MediaPlayerState.OFF
+    assert media_player.ATTR_INPUT_SOURCE not in state.attributes
+    assert media_player.ATTR_MEDIA_VOLUME_MUTED not in state.attributes
 
 
 async def test_turn_off(mocked_projector: MagicMock, hass: HomeAssistant) -> None:
