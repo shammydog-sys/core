@@ -1,6 +1,7 @@
 """Support for controlling projector via the PJLink protocol."""
 
 from collections.abc import Callable
+import logging
 from typing import Any, override
 
 import probatio
@@ -28,7 +29,11 @@ from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 from .const import CONF_ENCODING, DEFAULT_ENCODING, DEFAULT_PORT, DOMAIN
 
+_LOGGER = logging.getLogger(__name__)
+
 ERR_PROJECTOR_UNAVAILABLE = "projector unavailable"
+# PJLink ERR3. pypjlink maps that response to this ProjectorError message.
+ERR_UNAVAILABLE_TIME = "unavailable time"
 
 PLATFORM_SCHEMA = MEDIA_PLAYER_PLATFORM_SCHEMA.extend(
     {
@@ -185,12 +190,17 @@ class PjLinkDevice(MediaPlayerEntity):
             else:
                 raise
         except ProjectorError as err:
-            if str(err) == "unavailable time":
-                self._force_off()
-            elif str(err) == ERR_PROJECTOR_UNAVAILABLE:
+            if str(err) == ERR_UNAVAILABLE_TIME:
+                # ERR3 means the projector is temporarily busy, not powered off.
+                _LOGGER.debug(
+                    "Projector at %s reported unavailable time; keeping last known state",
+                    self._host,
+                )
+                return
+            if str(err) == ERR_PROJECTOR_UNAVAILABLE:
                 self._attr_available = False
-            else:
-                raise
+                return
+            raise
 
     def _run_command(self, command: Callable[[Projector], None]) -> None:
         """Run a projector command and surface failures as HomeAssistantError."""
